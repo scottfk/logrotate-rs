@@ -52,12 +52,15 @@ subordinate id range of at least 65536 for your user in `/etc/subuid` and `/etc/
 (with `newuidmap`/`newgidmap` from shadow).
 
 ```sh
-tools/build-reference.sh   # build the C reference at the pinned tag into ../logrotate
+make                # release build
+make reference      # build the C reference at the pinned tag into ../logrotate
+make check          # build the reference if needed and run everything
+make clippy         # cargo clippy --all-targets -D warnings
+make fmt            # cargo fmt
 ```
 
-The `make` targets (`make`, `make check`, `make clippy`, `make fmt`) arrive with the
-first code. **Before sending a PR, please make sure `make check`, `make clippy` and
-`make fmt` are clean.**
+**Before sending a PR, please make sure `make check`, `make clippy` and `make fmt` are
+clean.**
 
 ### Differential tests
 
@@ -66,7 +69,8 @@ same input, the way [metalog-rs](https://github.com/scottfk/metalog-rs) and
 [cronie-rs](https://github.com/scottfk/cronie-rs) do it:
 
 - Each run is in a private user and mount namespace with real users mapped from your
-  subordinate ids, and its own copy of the case's tree.
+  subordinate ids, and its own copy of the case's tree under
+  `target/difftest/<case>/{c,r}/`.
 - The clock comes from an LD_PRELOAD shim, so "does this log rotate today" and the
   `dateext` names are deterministic.
 - The exit status, stdout, stderr, the state file, mail, scripts run, and every file

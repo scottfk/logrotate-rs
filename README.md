@@ -17,7 +17,12 @@ A drop-in port/reimplementation of logrotate in rust. Currently just something f
 
 ## Status
 
-Just started: project docs and the reference build. No code yet.
+Phase 1 is done (branch `phase1-config`): the command line, the
+configuration parser, the `-l` log and syslog, and the state file. The
+program reads its configuration and state, prints the per-log summary with
+`-v`, and writes the state file back exactly as C logrotate does, but it
+doesn't rotate files yet: a log set with files fails with "rotating log
+files is not implemented yet". Don't install it yet.
 
 The reference is upstream's tag `3.22.0`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -32,26 +37,32 @@ The build reports itself as `logrotate 3.22.0`, like the release tarball,
 whose sources are the same as the tag's. The C reference passes upstream's
 own test suite (106 tests pass and 1 is skipped).
 
-## Planned layout
+## Layout
 
 Upstream is three C files (about 6,700 lines), and the port follows them:
 
 | Path | What |
 |---|---|
 | `src/config.rs` | `config.c`: the configuration parser, `include`, globs, taboo extensions, per-log defaults |
-| `src/state.rs` | `readState()`/`writeState()` and the state lock |
-| `src/rotate.rs` | `logrotate.c`: deciding what needs rotating, renaming, `dateext`, `olddir`, `create`/`copy`/`copytruncate`, compression, scripts, mail |
+| `src/state.rs` | `logrotate.c`'s state code: the hash table, `readState()`, `lockState()`, `writeState()` |
+| `src/rotate.rs` | `logrotate.c`'s rotation code: switching users, `createOutputFile()`, `rotateLogSet()` (for now, its summary); phase 2 adds what needs rotating, renaming, `dateext`, `olddir`, `create`/`copy`/`copytruncate`, compression, scripts, mail |
 | `src/log.rs` | `log.c`: messages to stderr, `-l` files and syslog |
 | `src/sys.rs` | every libc, popt and libacl call: the only `unsafe` code |
-| `src/main.rs` | `main()`: options, the state file, then each log set |
-| `tests/` | differential tests and the harness |
-| `contrib/gentoo/` | an `app-admin/logrotate` live ebuild, and how to switch and roll back |
+| `src/main.rs` | `main()`: options (through popt), the state file, then each log set |
+| `src/bytes.rs` | byte-string helpers, copied from cronie-rs |
+| `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
+| `contrib/gentoo/` | (phase 4) an `app-admin/logrotate` live ebuild, and how to switch and roll back |
 | `tools/` | the reference build |
 
-## Testing (planned)
+## Testing
 
-`make check` will build the C reference into `../logrotate` if it isn't
-there, then run two suites:
+```sh
+make check
+```
+
+This builds the C reference into `../logrotate` if it isn't there, then
+runs the differential suite (276 cases in phase 1). Upstream's own suite
+joins it once the port rotates files:
 
 1. **Differential tests.** Each case runs C logrotate and the port on
    copies of the same tree (config, logs, state file) and compares the exit
@@ -65,15 +76,21 @@ there, then run two suites:
      `dateext` and the state file's dates are deterministic, DST included.
    - `gzip`, `mail` and scripts are real programs in the sandbox, so what
      they were run with and on is compared too.
-   - `-d` (debug) prints the whole parsed configuration, which makes the
-     parser easy to compare on its own.
-2. **Upstream's test suite**, run against the port with
+   - `-v` prints a summary of each parsed log set, which makes the parser
+     easy to compare on its own: phase 1's cases name directories, which
+     logrotate skips, so nothing is rotated.
+2. **Upstream's test suite** (phase 3), run against the port with
    `LOGROTATE=target/release/logrotate`.
+
+To see what each case produced:
+`LOGROTATE_DIFF_SHOW=1 cargo test -- --nocapture`. Each run's files stay in
+`target/difftest/<case>/{c,r}/`.
 
 ## Roadmap
 
-1. **Configuration and the command line:** `config.c`, popt's options and
-   messages, `-d` output, and reading and writing the state file.
+1. **Configuration and the command line (done, branch `phase1-config`):**
+   `config.c`, popt's options and messages, the `-l` log, and reading,
+   locking and writing the state file.
 2. **Rotation:** what needs rotating and when (`daily` ... `yearly`,
    `size`, `minsize`, `maxsize`, `maxage`), the rename chain, `dateext`
    and `dateformat`, `olddir`, `create`, `copy`, `copytruncate`,
