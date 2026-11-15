@@ -21,7 +21,7 @@ pub struct LogState {
     pub fn_: Vec<u8>,
     /// Only tm_hour, tm_mday, tm_mon and tm_year are meaningful.
     pub last_rotated: sys::Tm,
-    #[allow(dead_code)] // set and read by the rotation code (phase 2)
+    pub sb: sys::Stat,
     pub do_rotate: bool,
     /// There is a real log file for this state.
     pub is_used: bool,
@@ -79,7 +79,8 @@ fn new_state(fn_: &[u8]) -> LogState {
     lr.tm_year = now.tm_year;
     lr.tm_isdst = now.tm_isdst;
     let t = sys::mktime(&mut lr);
-    LogState { fn_: fn_.to_vec(), last_rotated: sys::localtime(t), do_rotate: false, is_used: false }
+    let sb = sys::stat_zero();
+    LogState { fn_: fn_.to_vec(), last_rotated: sys::localtime(t), sb, do_rotate: false, is_used: false }
 }
 
 /// `unescape()`: `\n` and `\\` in a state file name.

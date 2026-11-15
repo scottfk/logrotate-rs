@@ -122,7 +122,7 @@ fn logrotate_main(args: &[Vec<u8>]) -> i32 {
     }
     let force = popt.force();
     let state_file = popt.state_file();
-    let _mail_command = popt.mail_command();
+    rotate::set_mail_command(popt.mail_command());
 
     let mut rc = 0;
     let (err, logs) = config::read_all_config_paths(&files);
@@ -145,7 +145,7 @@ fn logrotate_main(args: &[Vec<u8>]) -> i32 {
     msg!(MESS_DEBUG, format!("\nHandling {} logs\n", logs.num_logs));
 
     for log in logs.iter() {
-        rc |= rotate::rotate_log_set(log, force);
+        rc |= rotate::rotate_log_set(log, force, &mut states);
     }
 
     if !rotate::debug() {

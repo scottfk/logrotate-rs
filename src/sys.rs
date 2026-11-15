@@ -323,6 +323,12 @@ pub fn fstat(fd: Fd) -> Result<Stat, i32> {
     stat_with(|sb| unsafe { libc::fstat(fd, sb) })
 }
 
+/// A zeroed `struct stat`.
+pub fn stat_zero() -> Stat {
+    // SAFETY: struct stat is plain data.
+    unsafe { std::mem::zeroed() }
+}
+
 pub fn s_isreg(m: libc::mode_t) -> bool {
     m & libc::S_IFMT == libc::S_IFREG
 }
@@ -555,6 +561,17 @@ pub fn localtime(t: i64) -> Tm {
 pub fn mktime(tm: &mut Tm) -> i64 {
     // SAFETY: tm is a valid struct tm.
     unsafe { libc::mktime(tm) }
+}
+
+/// `strftime(buf, n, fmt, tm)` into an `n`-byte buffer: empty when the
+/// result doesn't fit (strftime returns 0).
+pub fn strftime_n(fmt: &[u8], tm: &Tm, n: usize) -> Vec<u8> {
+    let f = to_cstring(fmt);
+    let mut buf = vec![0u8; n];
+    // SAFETY: buf is valid for n bytes; f is NUL-terminated.
+    let r = unsafe { libc::strftime(buf.as_mut_ptr().cast(), n, f.as_ptr(), tm) };
+    buf.truncate(r);
+    buf
 }
 
 /// `strftime(fmt, tm)`.
@@ -904,4 +921,243 @@ pub fn exit(code: c_int) -> ! {
 pub fn sigpipe_default() {
     // SAFETY: setting a standard disposition.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+}
+
+// ---------------------------------------------------------------------------
+// processes (logrotate.c's scripts, compressors, shred and mail)
+
+pub fn getgid() -> u32 {
+    // SAFETY: no preconditions.
+    unsafe { libc::getgid() }
+}
+
+/// `setgid()`; 0 or -1 (errno set).
+pub fn setgid(g: u32) -> c_int {
+    // SAFETY: no memory arguments.
+    unsafe { libc::setgid(g) }
+}
+
+/// `setuid()`; 0 or -1 (errno set).
+pub fn setuid(u: u32) -> c_int {
+    // SAFETY: no memory arguments.
+    unsafe { libc::setuid(u) }
+}
+
+/// `fork()`: the child's pid, 0 in the child, or -1 (errno set).  The
+/// program is single-threaded, so the child may allocate.
+pub fn fork() -> i32 {
+    // SAFETY: single-threaded process.
+    unsafe { libc::fork() }
+}
+
+/// `wait(&status)`: (pid, status).
+pub fn wait_any() -> (i32, c_int) {
+    let mut st: c_int = 0;
+    // SAFETY: st is a valid out-pointer.
+    let pid = unsafe { libc::wait(&mut st) };
+    (pid, st)
+}
+
+/// `waitpid(pid, &status, 0)`: the status.
+pub fn waitpid(pid: i32) -> c_int {
+    let mut st: c_int = 0;
+    // SAFETY: st is a valid out-pointer.
+    unsafe { libc::waitpid(pid, &mut st, 0) };
+    st
+}
+
+/// `WIFEXITED(st) && WEXITSTATUS(st) == 0`.
+pub fn exited_ok(st: c_int) -> bool {
+    libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
+}
+
+/// `pipe()`: (read end, write end), or Err(errno).
+pub fn pipe() -> Result<(Fd, Fd), i32> {
+    let mut fds = [0 as c_int; 2];
+    // SAFETY: fds has room for two ints.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 { Err(errno()) } else { Ok((fds[0], fds[1])) }
+}
+
+/// `dup2()`.
+pub fn dup2(old: Fd, new: Fd) -> c_int {
+    // SAFETY: no memory arguments.
+    unsafe { libc::dup2(old, new) }
+}
+
+/// `read()` into buf; the count or -1 (errno set).
+pub fn read(fd: Fd, buf: &mut [u8]) -> isize {
+    // SAFETY: buf is valid for its length.
+    unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) }
+}
+
+/// `write()` from buf; the count or -1 (errno set).
+pub fn write(fd: Fd, buf: &[u8]) -> isize {
+    // SAFETY: buf is valid for its length.
+    unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) }
+}
+
+fn exec_argv(args: &[&[u8]]) -> (Vec<std::ffi::CString>, Vec<*const c_char>) {
+    let owned: Vec<std::ffi::CString> = args.iter().map(|a| to_cstring(a)).collect();
+    let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+    ptrs.push(std::ptr::null());
+    (owned, ptrs)
+}
+
+/// `execv(path, argv)`; returns only on failure (errno set).
+pub fn execv(path: &[u8], args: &[&[u8]]) {
+    let p = to_cstring(path);
+    let (_owned, ptrs) = exec_argv(args);
+    // SAFETY: p and every argv entry are NUL-terminated and outlive the call.
+    unsafe { libc::execv(p.as_ptr(), ptrs.as_ptr()) };
+}
+
+/// `execvp(file, argv)`; returns only on failure (errno set).
+pub fn execvp(file: &[u8], args: &[&[u8]]) {
+    let f = to_cstring(file);
+    let (_owned, ptrs) = exec_argv(args);
+    // SAFETY: as for execv.
+    unsafe { libc::execvp(f.as_ptr(), ptrs.as_ptr()) };
+}
+
+/// `putenv(s)`; the string is leaked, as putenv keeps it.
+pub fn putenv(s: &[u8]) {
+    let c = to_cstring(s).into_raw();
+    // SAFETY: c is a leaked NUL-terminated string, valid forever.
+    unsafe { libc::putenv(c) };
+}
+
+/// `access(path, F_OK) == 0`.
+pub fn exists(path: &[u8]) -> bool {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    unsafe { libc::access(c.as_ptr(), libc::F_OK) == 0 }
+}
+
+pub fn ftruncate(fd: Fd, len: i64) -> c_int {
+    // SAFETY: no memory arguments.
+    unsafe { libc::ftruncate(fd, len) }
+}
+
+/// `lseek(fd, off, SEEK_CUR)`.
+pub fn lseek_cur(fd: Fd, off: i64) -> i64 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::lseek(fd, off, libc::SEEK_CUR) }
+}
+
+/// `fcntl(fd, F_GETFL)`, then `F_SETFL` without O_NONBLOCK; false on error.
+pub fn clear_nonblock(fd: Fd) -> bool {
+    // SAFETY: no memory arguments.
+    unsafe {
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        fl != -1 && libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK) != -1
+    }
+}
+
+/// `futimens(fd, {st_atim, st_mtim})`.
+pub fn futimens_from(fd: Fd, sb: &Stat) {
+    let ts = [
+        libc::timespec { tv_sec: sb.st_atime, tv_nsec: sb.st_atime_nsec },
+        libc::timespec { tv_sec: sb.st_mtime, tv_nsec: sb.st_mtime_nsec },
+    ];
+    // SAFETY: ts holds two timespecs.
+    unsafe { libc::futimens(fd, ts.as_ptr()) };
+}
+
+/// `sscanf(s, "%d%c", &n, &c)`: (count, n).
+pub fn sscanf_d_c(s: &[u8]) -> (c_int, c_int) {
+    let c = to_cstring(s);
+    let mut n: c_int = 0;
+    let mut ch: c_char = 0;
+    // SAFETY: the format matches the two out-pointers' types.
+    let r = unsafe { libc::sscanf(c.as_ptr(), c"%d%c".as_ptr(), &mut n as *mut c_int, &mut ch as *mut c_char) };
+    (r, n)
+}
+
+unsafe extern "C" {
+    fn acl_get_file(path: *const c_char, kind: c_int) -> acl_t;
+    fn strptime(s: *const c_char, format: *const c_char, tm: *mut libc::tm) -> *mut c_char;
+}
+
+const ACL_TYPE_ACCESS: c_int = 0x8000;
+
+impl Acl {
+    /// `acl_get_file(path, ACL_TYPE_ACCESS)`; Err(errno).
+    pub fn get_file(path: &[u8]) -> Result<Acl, i32> {
+        let c = to_cstring(path);
+        // SAFETY: c is NUL-terminated; a non-NULL result is ours to free.
+        let a = unsafe { acl_get_file(c.as_ptr(), ACL_TYPE_ACCESS) };
+        if a.is_null() { Err(errno()) } else { Ok(Acl(a)) }
+    }
+}
+
+/// logrotate.c's glob error callback: report, and abort the glob.
+extern "C" fn rotate_globerr(path: *const c_char, err: c_int) -> c_int {
+    // SAFETY: glob passes a valid C string.
+    let p = unsafe { CStr::from_ptr(path) }.to_bytes().to_vec();
+    crate::log::message(crate::log::MESS_ERROR, &crate::bcat!("error accessing ", p, ": ", strerror(err), "\n"));
+    1
+}
+
+/// `glob(pattern, 0, globerr, &g)` with logrotate.c's callback: (rc, paths).
+pub fn glob_rotate(pattern: &[u8]) -> (c_int, Vec<Vec<u8>>) {
+    let c = to_cstring(pattern);
+    // SAFETY: as in glob_config.
+    let mut g: libc::glob_t = unsafe { std::mem::zeroed() };
+    // SAFETY: as in glob_config.
+    let rc = unsafe { libc::glob(c.as_ptr(), 0, Some(rotate_globerr), &mut g) };
+    let mut out = Vec::new();
+    if rc == 0 {
+        for i in 0..g.gl_pathc {
+            // SAFETY: gl_pathv holds gl_pathc valid C strings.
+            out.push(unsafe { CStr::from_ptr(*g.gl_pathv.add(i)) }.to_bytes().to_vec());
+        }
+    }
+    // SAFETY: g was filled by glob (or is still zeroed).
+    unsafe { libc::globfree(&mut g) };
+    (rc, out)
+}
+
+pub const GLOB_NOMATCH: c_int = libc::GLOB_NOMATCH;
+
+thread_local! {
+    static SORT_PREFIX: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SORT_FORMAT: std::cell::RefCell<std::ffi::CString> = std::cell::RefCell::new(std::ffi::CString::default());
+}
+
+/// `compGlobResult()`: compare by the time strptime() reads after the prefix.
+extern "C" fn comp_glob_result(a: *const c_void, b: *const c_void) -> c_int {
+    let prefix = SORT_PREFIX.with(std::cell::Cell::get);
+    let t = |p: *const c_void| -> i64 {
+        // SAFETY: qsort passes pointers to our array of C string pointers;
+        // each string is at least `prefix` bytes long (it matched the glob).
+        unsafe {
+            let s = *(p as *const *const c_char);
+            let mut tm: libc::tm = std::mem::zeroed();
+            SORT_FORMAT.with(|f| strptime(s.add(prefix), f.borrow().as_ptr(), &mut tm));
+            libc::mktime(&mut tm)
+        }
+    };
+    let (t1, t2) = (t(a), t(b));
+    t1.cmp(&t2) as c_int
+}
+
+/// `sortGlobResult()`: qsort the paths by their date, as C does (the same
+/// algorithm, so ties come out in the same order).
+pub fn sort_glob_result(paths: &mut [Vec<u8>], prefix_len: usize, dformat: &[u8]) {
+    if dformat.is_empty() {
+        return;
+    }
+    SORT_PREFIX.with(|p| p.set(prefix_len));
+    SORT_FORMAT.with(|f| *f.borrow_mut() = to_cstring(dformat));
+    let owned: Vec<std::ffi::CString> = paths.iter().map(|p| to_cstring(p)).collect();
+    let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+    // SAFETY: ptrs is an array of valid C string pointers; the comparator
+    // reads them only.
+    unsafe {
+        libc::qsort(ptrs.as_mut_ptr().cast(), ptrs.len(), std::mem::size_of::<*const c_char>(), Some(comp_glob_result));
+    }
+    let sorted: Vec<Vec<u8>> =
+        // SAFETY: each pointer still points into `owned`.
+        ptrs.iter().map(|&p| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()).collect();
+    paths.clone_from_slice(&sorted);
 }
