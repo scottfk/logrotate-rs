@@ -128,6 +128,8 @@ pub fn create_output_file(
         }
     };
     // Only attempt to set user/group if running as root.
+    // QUIRK: otherwise (under `su`, or run as a user) the owner and group
+    // asked for by `create` are dropped without a message.
     if sys::geteuid() == ROOT_UID
         && (sb_create.st_uid != sb.st_uid || sb_create.st_gid != sb.st_gid)
         && sys::fchown(fd, sb.st_uid, sb.st_gid) != 0
@@ -1343,6 +1345,8 @@ fn rotate_single_log(log: &LogInfo, log_num: usize, state: &mut LogState, names:
     let mut prev_acl: Option<sys::Acl> = None;
     let copying = log.has(LOG_FLAG_COPYTRUNCATE | LOG_FLAG_COPY);
     if !copying {
+        // QUIRK: the log was checked (regular file, not a symlink) before
+        // the prerotate script ran; whatever is at its path now is renamed.
         match sys::Acl::get_file(file) {
             Ok(a) => prev_acl = Some(a),
             Err(e) if is_acl_well_supported(e) => {

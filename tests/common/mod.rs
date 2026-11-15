@@ -21,7 +21,8 @@
 //! # What is compared
 //!
 //! The exit status, stdout, stderr, the syslog messages, and every file under
-//! `T` (type, mode, owner, contents), with `T` and the pid normalized.  The
+//! `T` (type, mode, owner, extended ACLs, contents), with `T` and the pid
+//! normalized.  The
 //! snapshot and the cleanup run as root inside the sandbox, so files owned
 //! by other users are covered too.
 //!
@@ -96,6 +97,11 @@ pub struct Case {
     /// Modification times for paths under T (files default to an hour
     /// before the case's time).
     pub mtimes: Vec<(String, i64)>,
+    /// `setfacl -m` specs (numeric ids) for paths under T.
+    pub acls: Vec<(String, String)>,
+    /// RLIMIT_FSIZE for the run, with SIGXFSZ ignored: writes past it fail
+    /// with EFBIG, standing in for a full disk.
+    pub fsize: Option<u64>,
 }
 
 impl Case {
@@ -109,6 +115,8 @@ impl Case {
             time: DEFAULT_TIME,
             user: As::Root,
             mtimes: Vec::new(),
+            acls: Vec::new(),
+            fsize: None,
         }
     }
 
@@ -182,6 +190,21 @@ impl Case {
 
     pub fn run_as(mut self, user: As) -> Case {
         self.user = user;
+        self
+    }
+
+    /// Add ACL entries to a path made earlier: a `setfacl -m` spec with
+    /// numeric ids, e.g. `u:1001:rw,m::rw` or `d:u:1002:r` (a default ACL).
+    /// The path's owner and mode are set first, so `chmod` can't change the
+    /// mask afterward.
+    pub fn acl(mut self, path: &str, spec: &str) -> Case {
+        self.acls.push((path.into(), spec.into()));
+        self
+    }
+
+    /// Limit the size of files the run writes (see [`Case::fsize`]).
+    pub fn fsize(mut self, bytes: u64) -> Case {
+        self.fsize = Some(bytes);
         self
     }
 }
@@ -293,6 +316,7 @@ struct Spawn {
     /// (lchown, and chmod unless the mode is u32::MAX).
     chowns: Vec<(CString, u32, u32, u32)>,
     user: As,
+    fsize: Option<u64>,
     dir: CString,
     stdio: [c_int; 3],
     exe: CString,
@@ -360,6 +384,13 @@ fn spawn_in_sandbox(s: Spawn) -> u32 {
                 {
                     libc::_exit(124);
                 }
+            }
+            if let Some(limit) = s.fsize {
+                let rl = libc::rlimit { rlim_cur: limit, rlim_max: limit };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &rl) != 0 {
+                    libc::_exit(124);
+                }
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
             }
             if let As::User(u, g, _) = s.user
                 && (libc::setgroups(gs.len(), gs.as_ptr()) != 0 || libc::setgid(g) != 0 || libc::setuid(u) != 0)
@@ -465,6 +496,7 @@ fn root_shell(t: &Path, script: &str) -> Vec<u8> {
         binds: Vec::new(),
         chowns: Vec::new(),
         user: As::Root,
+        fsize: None,
         dir: cstr("/"),
         stdio: [null.as_raw_fd(), outf.as_raw_fd(), outf.as_raw_fd()],
         exe: cstr("/bin/sh"),
@@ -541,7 +573,9 @@ fn snapshot(t: &Path, pid: u32) -> BTreeMap<String, String> {
            printf '\\001%s\\002%s' \"$f\" \"$(stat -c '%F %a %u:%g' \"$f\")\"
            if [ -f \"$f\" ] && [ ! -L \"$f\" ]; then
              m=$(stat -c %Y \"$f\"); [ \"$m\" -gt {recent} ] && m=now; printf ' mtime %s' \"$m\"
-             getfacl -c --skip-base \"$f\" 2>/dev/null | grep -v '^$' | tr '\\n' ' '
+           fi
+           if [ ! -L \"$f\" ] && {{ [ -f \"$f\" ] || [ -d \"$f\" ]; }}; then
+             printf ' '; getfacl -c -n --skip-base \"$f\" 2>/dev/null | grep -v '^$' | tr '\\n' ' '
            fi
            printf '\\002'
            if [ -L \"$f\" ]; then readlink \"$f\"
@@ -648,6 +682,24 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     for (path, mt) in &case.mtimes {
         set_mtime(&t.join(subst_real(path, &t)), *mt);
     }
+    // ACLs, as root: the path's owner and mode first (taken out of the
+    // fixups made in the sandbox, whose chmod would rewrite the mask).
+    if !case.acls.is_empty() {
+        let mut script = String::from("set -e\n");
+        for (path, spec) in &case.acls {
+            let p = t.join(subst_real(path, &t));
+            let pc = path_c(&p);
+            if let Some(i) = chowns.iter().position(|(c, ..)| *c == pc) {
+                let (_, u, g, m) = chowns.remove(i);
+                script += &format!("chown -h {u}:{g} '{}'\n", p.display());
+                if m != u32::MAX {
+                    script += &format!("chmod {m:o} '{}'\n", p.display());
+                }
+            }
+            script += &format!("setfacl -m '{spec}' '{}'\n", p.display());
+        }
+        root_shell(&t, &script);
+    }
     // Directories' modes last, innermost first, so the files inside them
     // could be made.
     let (dirs, mut rest): (Vec<_>, Vec<_>) = chowns
@@ -685,6 +737,29 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     let stdin = std::fs::File::open("/dev/null").unwrap();
     let stdout = std::fs::File::create(t.join("stdout")).unwrap();
     let stderr = std::fs::File::create(t.join("stderr")).unwrap();
+    // Under a file size limit, the output goes through pipes (the limit
+    // would cut the files short), copied to the files as it comes.
+    let mut copiers = Vec::new();
+    let mut child_out = [stdout.as_raw_fd(), stderr.as_raw_fd()];
+    if case.fsize.is_some() {
+        for (slot, file) in child_out.iter_mut().zip([&stdout, &stderr]) {
+            let (rd, wr) = pipe();
+            *slot = wr;
+            let mut file = file.try_clone().unwrap();
+            copiers.push((
+                wr,
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    use std::os::fd::FromRawFd;
+                    // SAFETY: rd is a fresh pipe end owned only by this thread.
+                    let mut pipe = unsafe { std::fs::File::from_raw_fd(rd) };
+                    let mut data = Vec::new();
+                    pipe.read_to_end(&mut data).unwrap();
+                    file.write_all(&data).unwrap();
+                }),
+            ));
+        }
+    }
 
     let mut envp = vec![
         cstr(format!("LD_PRELOAD={}", shim().display())),
@@ -700,13 +775,21 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         binds: binds(&t),
         chowns,
         user: case.user,
+        fsize: case.fsize,
         dir: path_c(&fixed_root()),
-        stdio: [stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()],
+        stdio: [stdin.as_raw_fd(), child_out[0], child_out[1]],
         exe: path_c(bin),
         argv,
         envp,
     });
+    for (wr, _) in &copiers {
+        // SAFETY: closing our copy of the child's write end.
+        unsafe { libc::close(*wr) };
+    }
     let status = wait(pid, Duration::from_secs(20));
+    for (_, copier) in copiers {
+        copier.join().unwrap();
+    }
     assert_ne!(status, "timeout", "{}: {label}: did not exit", case.name);
     // 120-127: the sandbox child failed before or at exec (see spawn_in_sandbox).
     if let Some(code) = status.strip_prefix("exit ").and_then(|c| c.parse::<i32>().ok()) {

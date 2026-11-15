@@ -30,6 +30,8 @@ cosmetic or hard to hit.
 |---|---|---|---|
 | low | A log that doesn't exist (with `missingok`) still gets a state file entry dated now: `rotateLogSet()` calls `findState()` for every file after `findNeedRotating()` skipped it. When the log appears, its first rotation waits a full interval. | `rotate.rs` (`rotate_log_set`) | `state_updates` |
 | low | A `dateformat` conversion other than `%Y %m %d %H %M %S %V %s %z` is turned into `%%`, so the rotated name holds it literally (`-%a-%d` gives `app.log-%a-11`). | `rotate.rs` (`dateformat_pattern`) | `dateext` (`dateext_format_unsupported`) |
+| medium | `create`'s owner and group are applied only when the effective uid is root. Under `su`, or when logrotate runs as a user, `create 0600 root root` makes a file owned by that user, without a message. | `rotate.rs` (`create_output_file`) | `su_create_root`, `user_create_chown_ignored` |
+| low | The log is checked (a regular file, not a symlink) before the prerotate script runs. If the script puts a directory at the log's path, the directory is rotated and a new log created beside it. | `rotate.rs` (`rotate_single_log`) | `prerotate_log_becomes_dir` |
 | low | `movefd()` closes the old descriptor only when `dup2()` returns 0, that is, only for stdin. The compressor, `shred` and the uncompressor inherit extra open descriptors to the files they work on. | `rotate.rs` (`movefd`) | none (not visible in output) |
 
 ## Command line
