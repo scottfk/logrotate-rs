@@ -80,6 +80,8 @@ pub enum Node {
     Symlink(String),
     /// A FIFO, mode.
     Fifo(u32),
+    /// A hard link to another path under T.
+    Hardlink(String),
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +93,9 @@ pub struct Case {
     pub nodes: Vec<(String, Node)>,
     pub time: (i64, i64),
     pub user: As,
+    /// Modification times for paths under T (files default to an hour
+    /// before the case's time).
+    pub mtimes: Vec<(String, i64)>,
 }
 
 impl Case {
@@ -103,6 +108,7 @@ impl Case {
             nodes: Vec::new(),
             time: DEFAULT_TIME,
             user: As::Root,
+            mtimes: Vec::new(),
         }
     }
 
@@ -146,6 +152,18 @@ impl Case {
         self
     }
 
+    /// A hard link at `path` to `target` (both under T).
+    pub fn hardlink(mut self, path: &str, target: &str) -> Case {
+        self.nodes.push((path.into(), Node::Hardlink(target.into())));
+        self
+    }
+
+    /// Drop a node added earlier (e.g. a default one).
+    pub fn no_file(mut self, path: &str) -> Case {
+        self.nodes.retain(|(p, _)| p != path);
+        self
+    }
+
     pub fn fifo(mut self, path: &str, mode: u32) -> Case {
         self.nodes.push((path.into(), Node::Fifo(mode)));
         self
@@ -153,6 +171,12 @@ impl Case {
 
     pub fn time(mut self, sec: i64) -> Case {
         self.time = (sec, 0);
+        self
+    }
+
+    /// Set a file's modification time (seconds).
+    pub fn mtime(mut self, path: &str, t: i64) -> Case {
+        self.mtimes.push((path.into(), t));
         self
     }
 
@@ -205,13 +229,29 @@ fn shim() -> &'static Path {
     })
 }
 
-fn subst(s: &str, t: &Path) -> String {
+/// Where every run's `T` appears inside its sandbox (each run binds its own
+/// directory there, in its own mount namespace), so the C and Rust runs see
+/// the same paths: logrotate's state file order depends on them.
+pub fn fixed_root() -> PathBuf {
+    let p = manifest_dir().join("target/difftest/.root");
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+/// `@T@` as the program sees it.
+fn subst(s: &str, _t: &Path) -> String {
+    s.replace("@T@", fixed_root().to_str().unwrap())
+}
+
+/// `@T@` as the harness sees it, outside the sandbox.
+fn subst_real(s: &str, t: &Path) -> String {
     s.replace("@T@", t.to_str().unwrap())
 }
 
-fn subst_bytes(s: &[u8], t: &Path) -> Vec<u8> {
+fn subst_bytes(s: &[u8], _t: &Path) -> Vec<u8> {
     let pat = b"@T@";
-    let rep = t.to_str().unwrap().as_bytes();
+    let root = fixed_root();
+    let rep = root.to_str().unwrap().as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
@@ -401,6 +441,7 @@ fn wait(pid: u32, timeout: Duration) -> String {
 /// The binds every sandbox gets.
 fn binds(t: &Path) -> Vec<(CString, CString)> {
     let mut b = vec![
+        (path_c(t), path_c(&fixed_root())),
         (cstr("/etc"), path_c(&t.join(".realetc"))),
         (path_c(&t.join("etc")), cstr("/etc")),
         (path_c(&t.join("tmp")), cstr("/tmp")),
@@ -419,8 +460,9 @@ fn root_shell(t: &Path, script: &str) -> Vec<u8> {
     let out = t.with_extension("rootsh.out");
     let outf = std::fs::File::create(&out).unwrap();
     let null = std::fs::File::open("/dev/null").unwrap();
+    // No binds: it works on real paths, and must work on a half-removed tree.
     let pid = spawn_in_sandbox(Spawn {
-        binds: binds(t),
+        binds: Vec::new(),
         chowns: Vec::new(),
         user: As::Root,
         dir: cstr("/"),
@@ -448,9 +490,25 @@ fn clean(t: &Path) {
     std::fs::remove_dir_all(t).unwrap_or_else(|e| panic!("can't clean {}: {e}", t.display()));
 }
 
-/// Replace `T` with `@T@` and the program's pid with `@PID@`.
+/// Replace `T` with `@T@`, the program's pid with `@PID@`, and the pids
+/// children report in "(pid N)" with `@CHILD@`.
 pub fn normalize(s: &str, t: &Path, pid: u32) -> String {
-    let s = s.replace(t.to_str().unwrap(), "@T@");
+    let s = s.replace(t.to_str().unwrap(), "@T@").replace(fixed_root().to_str().unwrap(), "@T@");
+    let s = {
+        let mut out = String::new();
+        let mut rest = s.as_str();
+        while let Some(k) = rest.find("(pid ") {
+            out.push_str(&rest[..k + 5]);
+            rest = &rest[k + 5..];
+            let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if n > 0 && rest[n..].starts_with(')') && rest[..n] != pid.to_string() {
+                out.push_str("@CHILD@");
+                rest = &rest[n..];
+            }
+        }
+        out.push_str(rest);
+        out
+    };
     let pid_s = pid.to_string();
     let mut out = String::new();
     let b = s.as_bytes();
@@ -471,15 +529,34 @@ pub fn normalize(s: &str, t: &Path, pid: u32) -> String {
 }
 
 /// The tree under `t`, as root in the sandbox: type, mode, owner, contents.
+/// Regular files show their modification time ("now" for times the run
+/// set, which are real time), extended ACLs, and their contents, with
+/// compressed files shown decompressed (gzip headers hold times).
 fn snapshot(t: &Path, pid: u32) -> BTreeMap<String, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     let script = format!(
         "cd '{}' || exit 1
          find . -mindepth 1 \\( -path ./.realetc -o -path ./etc -o -name devlog -o -name .faketime \
             -o -name stdout -o -name stderr \\) -prune -o -print | LC_ALL=C sort | while read -r f; do
-           printf '\\001%s\\002%s\\002' \"$f\" \"$(stat -c '%F %a %u:%g' \"$f\")\"
-           if [ -L \"$f\" ]; then readlink \"$f\"; elif [ -f \"$f\" ]; then cat \"$f\"; fi
+           printf '\\001%s\\002%s' \"$f\" \"$(stat -c '%F %a %u:%g' \"$f\")\"
+           if [ -f \"$f\" ] && [ ! -L \"$f\" ]; then
+             m=$(stat -c %Y \"$f\"); [ \"$m\" -gt {recent} ] && m=now; printf ' mtime %s' \"$m\"
+             getfacl -c --skip-base \"$f\" 2>/dev/null | grep -v '^$' | tr '\\n' ' '
+           fi
+           printf '\\002'
+           if [ -L \"$f\" ]; then readlink \"$f\"
+           elif [ -f \"$f\" ]; then
+             case \"$f\" in
+               *.gz) printf 'gzip:'; gzip -dc < \"$f\" 2>&1 ;;
+               *.xz) printf 'xz:'; xz -dc < \"$f\" 2>&1 ;;
+               *.bz2) printf 'bzip2:'; bzip2 -dc < \"$f\" 2>&1 ;;
+               *.zst) printf 'zstd:'; zstd -qdc < \"$f\" 2>&1 ;;
+               *) cat \"$f\" ;;
+             esac
+           fi
          done; exit 0",
-        t.display()
+        t.display(),
+        recent = now - 86400
     );
     let raw = root_shell(t, &script);
     let text = String::from_utf8_lossy(&raw).to_string();
@@ -524,7 +601,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         (path_c(&t.join("tmp")), 0, 0, 0o1777),
     ];
     for (path, node) in &case.nodes {
-        let p = t.join(subst(path, &t));
+        let p = t.join(subst_real(path, &t));
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -545,6 +622,9 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
             Node::Symlink(target) => {
                 std::os::unix::fs::symlink(subst(target, &t), &p).unwrap();
             }
+            Node::Hardlink(target) => {
+                std::fs::hard_link(t.join(subst_real(target, &t)), &p).unwrap();
+            }
             Node::Fifo(mode) => {
                 let c = path_c(&p);
                 // SAFETY: c is NUL-terminated.
@@ -552,6 +632,21 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(*mode)).unwrap();
             }
         }
+    }
+    // Fixed modification times: an hour before the case's time, or as set.
+    let set_mtime = |p: &Path, t: i64| {
+        let c = path_c(p);
+        let ts = [libc::timespec { tv_sec: t, tv_nsec: 0 }, libc::timespec { tv_sec: t, tv_nsec: 0 }];
+        // SAFETY: c is NUL-terminated and ts holds two timespecs.
+        unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    };
+    for (path, node) in &case.nodes {
+        if let Node::File(..) = node {
+            set_mtime(&t.join(subst_real(path, &t)), case.time.0 - 3600);
+        }
+    }
+    for (path, mt) in &case.mtimes {
+        set_mtime(&t.join(subst_real(path, &t)), *mt);
     }
     // Directories' modes last, innermost first, so the files inside them
     // could be made.
@@ -605,7 +700,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         binds: binds(&t),
         chowns,
         user: case.user,
-        dir: path_c(&t),
+        dir: path_c(&fixed_root()),
         stdio: [stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()],
         exe: path_c(bin),
         argv,

@@ -1,17 +1,20 @@
 # Makefile - front door for building and testing logrotate-rs
 #
 # 20261115 - Created by Claude (claude.ai, Anthropic) - scottfk
+# 20261115 - check also runs upstream's test suite (tools/upstream-tests.sh) - Claude - scottfk
 #
 #   make              release build (target/release/)
 #   make reference    build the C reference at tools/REFERENCE_TAG into ../logrotate
-#   make check        build the reference if needed, then run every test
+#   make check        build the reference if needed, then run every test:
+#                     the differential suite and upstream's own suite
+#   make upstream     upstream's test suite against target/release/logrotate
 #   make clippy       cargo clippy --all-targets -D warnings
 #   make fmt          cargo fmt
 
 CARGO     ?= cargo
 REFERENCE ?= ../logrotate
 
-.PHONY: all build reference check test clippy fmt clean
+.PHONY: all build reference check upstream test clippy fmt clean
 
 all: build
 
@@ -23,6 +26,10 @@ reference:
 
 check: reference
 	LOGROTATE_REFERENCE=$(abspath $(REFERENCE)) $(CARGO) test
+	$(MAKE) upstream
+
+upstream: reference build
+	tools/upstream-tests.sh $(abspath $(REFERENCE))
 
 test: check
 

@@ -76,7 +76,8 @@ same input, the way [metalog-rs](https://github.com/scottfk/metalog-rs) and
 - The exit status, stdout, stderr, the state file, mail, scripts run, and every file
   left behind (contents, owner, mode, ACLs, times) are compared.
 
-Upstream's own test suite is run against the port as well.
+Upstream's own test suite is run against the port as well (`make upstream`, which `make
+check` includes).
 
 When you fix a difference or change behavior, add cases that cover it, including error
 paths and odd input. Unit tests are fine for internal helpers, but a differential test is

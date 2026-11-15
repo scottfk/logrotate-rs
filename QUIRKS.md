@@ -17,12 +17,20 @@ cosmetic or hard to hit.
 | medium | A bad `minage` or `maxage` value is reported with the rest of the configuration file, starting from the value's last character, instead of the value: the message prints a pointer into the mapped file as `%s`. | `config.rs` (`minage`/`maxage`) | `counts` |
 | medium | Likewise, a bad `mail` address is reported with the rest of the file, starting just after the `mail` keyword. | `config.rs` (`read_address`) | `mail_addresses` |
 | **high** | If an `include` inside a log definition fails, the definition is restored from a backup that has no pattern and no files: `-v` shows `rotating pattern: (null)` and the definition's logs are not rotated. When the included path is a single file, the backup was taken before the file was read, so it also restores the definition's old queue link: every definition queued after it (those the included file added, and all later ones in the outer files) silently drops out of the run, while "Handling N logs" still counts them. | `config.rs` (`read_config_path`, `copy_from`) | `includes` (`include_in_definition_error`, `include_in_definition_with_logs_error`) |
-| medium | `addextension` set outside a definition never reaches the definitions: `copyLogInfo()` doesn't copy it. | `config.rs` (`LogInfo::copy_from`) | (phase 2) |
+| medium | `addextension` set outside a definition never reaches the definitions: `copyLogInfo()` doesn't copy it. | `config.rs` (`LogInfo::copy_from`) | `extensions` (`addextension_global`) |
 | low | A directive with an argument but none given (`size`, `rotate`, `tabooext`...) at the very end of a line skips the line counter, so every later message has the wrong line number. With a trailing blank it doesn't. | `config.rs` (`size`, `tabooext`) | `size_without_value` |
 | low | `create`, `su` and `weekly` at the end of a file without a final newline keep their trailing blanks, which can read as an empty extra argument (`create 0640 alice ` fails with "unknown group ''"). | `config.rs` (`isolate_line`) | `create_arguments`, `weekly_arguments` |
 | low | A keyword followed by a byte at or above 0x80 is reported as `found 0xffffffc3`: the byte is a signed `char` printed with `%#x`. | `config.rs` (`fmt_hash_x`) | `unknown_and_malformed` |
 | low | The `errors` directive warns that it's obsolete but doesn't skip its argument, which is then parsed as a keyword (`errors root@localhost` also fails with "keyword 'root' not properly separated"). | `config.rs` (`errors`) | `errors_directive` |
 | low | A FIFO in an included directory, or named on the command line, blocks logrotate forever in `open()`, before the "not a regular file" check. | `config.rs` (`read_config_file`) | none (it hangs) |
+
+## Rotation
+
+| Severity | Quirk | Where | Test |
+|---|---|---|---|
+| low | A log that doesn't exist (with `missingok`) still gets a state file entry dated now: `rotateLogSet()` calls `findState()` for every file after `findNeedRotating()` skipped it. When the log appears, its first rotation waits a full interval. | `rotate.rs` (`rotate_log_set`) | `state_updates` |
+| low | A `dateformat` conversion other than `%Y %m %d %H %M %S %V %s %z` is turned into `%%`, so the rotated name holds it literally (`-%a-%d` gives `app.log-%a-11`). | `rotate.rs` (`dateformat_pattern`) | `dateext` (`dateext_format_unsupported`) |
+| low | `movefd()` closes the old descriptor only when `dup2()` returns 0, that is, only for stdin. The compressor, `shred` and the uncompressor inherit extra open descriptors to the files they work on. | `rotate.rs` (`movefd`) | none (not visible in output) |
 
 ## Command line
 

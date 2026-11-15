@@ -17,12 +17,12 @@ A drop-in port/reimplementation of logrotate in rust. Currently just something f
 
 ## Status
 
-Phase 1 is done (branch `phase1-config`): the command line, the
-configuration parser, the `-l` log and syslog, and the state file. The
-program reads its configuration and state, prints the per-log summary with
-`-v`, and writes the state file back exactly as C logrotate does, but it
-doesn't rotate files yet: a log set with files fails with "rotating log
-files is not implemented yet". Don't install it yet.
+Phases 1 and 2 are done: the command line, the configuration parser, the
+`-l` log and syslog, the state file, and rotation itself (every criterion,
+numbered and dated names, `olddir`, `create`, `copy`/`copytruncate`/
+`renamecopy`, compression, `shred`, scripts, mail and `su`). The
+differential suite and upstream's own test suite both pass. It hasn't been
+tried on a real system yet (phase 4), so don't install it yet.
 
 The reference is upstream's tag `3.22.0`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -45,14 +45,14 @@ Upstream is three C files (about 6,700 lines), and the port follows them:
 |---|---|
 | `src/config.rs` | `config.c`: the configuration parser, `include`, globs, taboo extensions, per-log defaults |
 | `src/state.rs` | `logrotate.c`'s state code: the hash table, `readState()`, `lockState()`, `writeState()` |
-| `src/rotate.rs` | `logrotate.c`'s rotation code: switching users, `createOutputFile()`, `rotateLogSet()` (for now, its summary); phase 2 adds what needs rotating, renaming, `dateext`, `olddir`, `create`/`copy`/`copytruncate`, compression, scripts, mail |
+| `src/rotate.rs` | `logrotate.c`'s rotation code: switching users, what needs rotating, renaming, `dateext`, `olddir`, `create`/`copy`/`copytruncate`, compression, `shred`, scripts, mail |
 | `src/log.rs` | `log.c`: messages to stderr, `-l` files and syslog |
 | `src/sys.rs` | every libc, popt and libacl call: the only `unsafe` code |
 | `src/main.rs` | `main()`: options (through popt), the state file, then each log set |
 | `src/bytes.rs` | byte-string helpers, copied from cronie-rs |
 | `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
 | `contrib/gentoo/` | (phase 4) an `app-admin/logrotate` live ebuild, and how to switch and roll back |
-| `tools/` | the reference build |
+| `tools/` | the reference build, and the runner for upstream's test suite |
 
 ## Testing
 
@@ -61,8 +61,7 @@ make check
 ```
 
 This builds the C reference into `../logrotate` if it isn't there, then
-runs the differential suite (276 cases in phase 1). Upstream's own suite
-joins it once the port rotates files:
+runs two suites:
 
 1. **Differential tests.** Each case runs C logrotate and the port on
    copies of the same tree (config, logs, state file) and compares the exit
@@ -76,11 +75,20 @@ joins it once the port rotates files:
      `dateext` and the state file's dates are deterministic, DST included.
    - `gzip`, `mail` and scripts are real programs in the sandbox, so what
      they were run with and on is compared too.
-   - `-v` prints a summary of each parsed log set, which makes the parser
-     easy to compare on its own: phase 1's cases name directories, which
-     logrotate skips, so nothing is rotated.
-2. **Upstream's test suite** (phase 3), run against the port with
-   `LOGROTATE=target/release/logrotate`.
+   - Files the harness makes have fixed modification times, the fake
+     `-m` mailer records what it's sent, and compressed files are compared
+     decompressed (gzip headers hold times).
+   - Each run's directory is bound onto the same path inside its sandbox,
+     so both programs see identical paths (the state file's order depends
+     on them).
+   - 434 cases: 274 for the command line, parser and state file
+     ([tests/diff_config.rs](tests/diff_config.rs)), whose definitions name
+     directories so nothing rotates, and 160 for rotation
+     ([tests/diff_rotate.rs](tests/diff_rotate.rs)).
+2. **Upstream's test suite** ([tools/upstream-tests.sh](tools/upstream-tests.sh)):
+   107 tests, run in a copy of the reference build tree with its
+   `logrotate` swapped for the port. 106 pass and the SELinux test is
+   skipped, the same as for C logrotate.
 
 To see what each case produced:
 `LOGROTATE_DIFF_SHOW=1 cargo test -- --nocapture`. Each run's files stay in
@@ -91,15 +99,15 @@ To see what each case produced:
 1. **Configuration and the command line (done, branch `phase1-config`):**
    `config.c`, popt's options and messages, the `-l` log, and reading,
    locking and writing the state file.
-2. **Rotation:** what needs rotating and when (`daily` ... `yearly`,
-   `size`, `minsize`, `maxsize`, `maxage`), the rename chain, `dateext`
-   and `dateformat`, `olddir`, `create`, `copy`, `copytruncate`,
-   compression, `shred`, scripts (`sharedscripts`, `firstaction`,
-   `lastaction`, `preremove`), mail and the `-l` log.
-3. **Users, ownership and ACLs:** `su`, `create` with an owner and group,
-   the ACL copies, and the permission checks on config files and
-   directories, tested with real users in the sandbox. Upstream's test
-   suite passes against the port.
+2. **Rotation (done, branch `phase2-rotate`):** what needs rotating and
+   when (`daily` ... `yearly`, `size`, `minsize`, `maxsize`, `maxage`),
+   the rename chain, `dateext` and `dateformat`, `olddir`, `create`,
+   `copy`, `copytruncate`, compression, `shred`, scripts (`sharedscripts`,
+   `firstaction`, `lastaction`, `preremove`), mail and `su`. Upstream's
+   test suite passes against the port.
+3. **ACLs and the remaining permission paths:** extended ACLs copied to
+   new, rotated and compressed files, failures midway (full disks,
+   unwritable directories, files that vanish), and more `su` cases.
 4. **Packaging:** a Gentoo ebuild (an `app-admin/logrotate` drop-in), with
    a VM rehearsal and a rollback through a binary package of the C build.
 
