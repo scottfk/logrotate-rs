@@ -17,13 +17,14 @@ A drop-in port/reimplementation of logrotate in rust. Currently just something f
 
 ## Status
 
-Phases 1 to 3 are done: the command line, the configuration parser, the
+All four phases are done: the command line, the configuration parser, the
 `-l` log and syslog, the state file, rotation itself (every criterion,
 numbered and dated names, `olddir`, `create`, `copy`/`copytruncate`/
 `renamecopy`, compression, `shred`, scripts, mail and `su`), extended
-ACLs, and what happens when a step fails partway. The differential suite
-and upstream's own test suite both pass. It hasn't been tried on a real
-system yet (phase 4), so don't install it yet.
+ACLs, what happens when a step fails partway, and a Gentoo package. The
+differential suite and upstream's own test suite both pass, and the package
+was rehearsed on a test VM, rollback included
+([contrib/gentoo/README.md](contrib/gentoo/README.md)).
 
 The reference is upstream's tag `3.22.0`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -52,8 +53,8 @@ Upstream is three C files (about 6,700 lines), and the port follows them:
 | `src/main.rs` | `main()`: options (through popt), the state file, then each log set |
 | `src/bytes.rs` | byte-string helpers, copied from cronie-rs |
 | `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
-| `contrib/gentoo/` | (phase 4) an `app-admin/logrotate` live ebuild, and how to switch and roll back |
-| `tools/` | the reference build, and the runner for upstream's test suite |
+| `contrib/gentoo/` | an `app-admin/logrotate` live ebuild, and how to switch and roll back |
+| `tools/` | the reference build, the runner for upstream's test suite, and the VM rehearsal check |
 
 ## Testing
 
@@ -116,8 +117,9 @@ To see what each case produced:
    state files (and default ACLs of directories), failures midway (full
    disks, unwritable directories, files that vanish or change type under a
    script), and more `su` cases.
-4. **Packaging:** a Gentoo ebuild (an `app-admin/logrotate` drop-in), with
-   a VM rehearsal and a rollback through a binary package of the C build.
+4. **Packaging (done, branch `phase4-ebuild`):** a Gentoo ebuild (an
+   `app-admin/logrotate` drop-in), with a VM rehearsal and a rollback
+   through a binary package of the C build.
 
 ## Contributing
 

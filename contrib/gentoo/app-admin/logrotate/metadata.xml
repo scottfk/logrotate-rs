@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>scottfk@gmail.com</email>
+	</maintainer>
+	<longdescription>
+		logrotate 3.22.0 with the program replaced by logrotate-rs, a
+		strict-compatibility Rust port; the configuration, man page, cron
+		script and service files are the same as app-admin/logrotate's.
+	</longdescription>
+	<use>
+		<flag name="cron">Installs cron file</flag>
+	</use>
+	<upstream>
+		<remote-id type="github">scottfk/logrotate-rs</remote-id>
+		<remote-id type="github">logrotate/logrotate</remote-id>
+	</upstream>
+</pkgmetadata>
