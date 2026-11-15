@@ -17,12 +17,13 @@ A drop-in port/reimplementation of logrotate in rust. Currently just something f
 
 ## Status
 
-Phases 1 and 2 are done: the command line, the configuration parser, the
-`-l` log and syslog, the state file, and rotation itself (every criterion,
+Phases 1 to 3 are done: the command line, the configuration parser, the
+`-l` log and syslog, the state file, rotation itself (every criterion,
 numbered and dated names, `olddir`, `create`, `copy`/`copytruncate`/
-`renamecopy`, compression, `shred`, scripts, mail and `su`). The
-differential suite and upstream's own test suite both pass. It hasn't been
-tried on a real system yet (phase 4), so don't install it yet.
+`renamecopy`, compression, `shred`, scripts, mail and `su`), extended
+ACLs, and what happens when a step fails partway. The differential suite
+and upstream's own test suite both pass. It hasn't been tried on a real
+system yet (phase 4), so don't install it yet.
 
 The reference is upstream's tag `3.22.0`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -81,10 +82,15 @@ runs two suites:
    - Each run's directory is bound onto the same path inside its sandbox,
      so both programs see identical paths (the state file's order depends
      on them).
-   - 434 cases: 274 for the command line, parser and state file
+   - Writes that fail partway (a full disk) are made with a file size
+     limit (`RLIMIT_FSIZE`, with `SIGXFSZ` ignored): they fail with
+     `EFBIG` instead of `ENOSPC`, through the same code.
+   - 511 cases: 274 for the command line, parser and state file
      ([tests/diff_config.rs](tests/diff_config.rs)), whose definitions name
-     directories so nothing rotates, and 160 for rotation
-     ([tests/diff_rotate.rs](tests/diff_rotate.rs)).
+     directories so nothing rotates; 160 for rotation
+     ([tests/diff_rotate.rs](tests/diff_rotate.rs)); and 77 for ACLs,
+     failures midway, unwritable directories and `su`
+     ([tests/diff_failures.rs](tests/diff_failures.rs)).
 2. **Upstream's test suite** ([tools/upstream-tests.sh](tools/upstream-tests.sh)):
    107 tests, run in a copy of the reference build tree with its
    `logrotate` swapped for the port. 106 pass and the SELinux test is
@@ -105,9 +111,11 @@ To see what each case produced:
    `copy`, `copytruncate`, compression, `shred`, scripts (`sharedscripts`,
    `firstaction`, `lastaction`, `preremove`), mail and `su`. Upstream's
    test suite passes against the port.
-3. **ACLs and the remaining permission paths:** extended ACLs copied to
-   new, rotated and compressed files, failures midway (full disks,
-   unwritable directories, files that vanish), and more `su` cases.
+3. **ACLs and the remaining permission paths (done, branch
+   `phase3-acl`):** extended ACLs copied to new, rotated, compressed and
+   state files (and default ACLs of directories), failures midway (full
+   disks, unwritable directories, files that vanish or change type under a
+   script), and more `su` cases.
 4. **Packaging:** a Gentoo ebuild (an `app-admin/logrotate` drop-in), with
    a VM rehearsal and a rollback through a binary package of the C build.
 
